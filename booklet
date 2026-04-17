@@ -1,0 +1,873 @@
+#!/usr/bin/env python3
+"""
+Instruction Booklet Builder
+Creates a PDF instruction booklet from photos and handwritten recipe notes.
+
+To share this with someone, they just need this folder structure:
+
+  some_folder/
+  ├── instruction_booklet.py
+  └── images/
+      ├── IMG_0285.jpeg
+      ├── IMG_0289.jpeg
+      ├── IMG_0290.jpeg
+      └── ... (all photos)
+
+"""
+
+import os
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
+from reportlab.lib.colors import HexColor, white, black
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+from reportlab.platypus import Paragraph, Frame
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from PIL import Image
+
+# --- CONFIG ---
+OUTPUT_PDF = "/sessions/loving-admiring-dirac/mnt/instructions/Instruction_Booklet.pdf"
+IMG_DIR = "/sessions/loving-admiring-dirac/resized"
+PAGE_W, PAGE_H = letter  # 612 x 792
+MARGIN = 0.6 * inch
+
+# Colors - Blue (Juliette / shared)
+ACCENT = HexColor("#2B6CB0")       # Dark blue
+ACCENT_LIGHT = HexColor("#EBF4FF") # Light blue bg
+HEADER_BG = HexColor("#2B6CB0")
+STEP_BG = HexColor("#F0F7FF")
+DIVIDER = HexColor("#CBD5E0")
+TEXT_DARK = HexColor("#1A202C")
+TEXT_MED = HexColor("#4A5568")
+TEXT_LIGHT = HexColor("#718096")
+STEP_NUM_BG = HexColor("#2B6CB0")
+INGREDIENT_BG = HexColor("#F7FAFC")
+
+# Colors - Pink (Isabelle)
+PINK_ACCENT = HexColor("#C53082")        # Deep pink
+PINK_ACCENT_LIGHT = HexColor("#FFF0F7")  # Light pink bg
+PINK_HEADER_BG = HexColor("#D53F8C")     # Pink header
+PINK_STEP_BG = HexColor("#FFF5F7")       # Pink tint bg
+PINK_STEP_NUM_BG = HexColor("#D53F8C")   # Pink step circles
+PINK_INGREDIENT_BG = HexColor("#FFF5F7") # Pink ingredient bg
+PINK_DIVIDER = HexColor("#FBB6CE")       # Pink border
+
+# Styles
+title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=28,
+                              textColor=white, alignment=TA_CENTER, leading=34)
+subtitle_style = ParagraphStyle('Subtitle', fontName='Helvetica', fontSize=13,
+                                 textColor=HexColor("#BEE3F8"), alignment=TA_CENTER, leading=18)
+recipe_title_style = ParagraphStyle('RecipeTitle', fontName='Helvetica-Bold', fontSize=20,
+                                     textColor=ACCENT, alignment=TA_LEFT, leading=26)
+body_style = ParagraphStyle('Body', fontName='Helvetica', fontSize=11,
+                             textColor=TEXT_DARK, alignment=TA_LEFT, leading=16)
+step_style = ParagraphStyle('Step', fontName='Helvetica', fontSize=10.5,
+                             textColor=TEXT_DARK, alignment=TA_LEFT, leading=15)
+ingredient_style = ParagraphStyle('Ingredient', fontName='Helvetica', fontSize=11,
+                                   textColor=TEXT_DARK, alignment=TA_LEFT, leading=16)
+section_header_style = ParagraphStyle('SectionHeader', fontName='Helvetica-Bold', fontSize=14,
+                                       textColor=ACCENT, alignment=TA_LEFT, leading=20)
+note_style = ParagraphStyle('Note', fontName='Helvetica-Oblique', fontSize=10,
+                             textColor=TEXT_LIGHT, alignment=TA_LEFT, leading=14)
+
+
+def draw_rounded_rect(c, x, y, w, h, r, fill_color=None, stroke_color=None, stroke_width=0.5):
+    """Draw a rounded rectangle."""
+    c.saveState()
+    if fill_color:
+        c.setFillColor(fill_color)
+    if stroke_color:
+        c.setStrokeColor(stroke_color)
+        c.setLineWidth(stroke_width)
+    p = c.beginPath()
+    p.roundRect(x, y, w, h, r)
+    if fill_color and stroke_color:
+        c.drawPath(p, fill=1, stroke=1)
+    elif fill_color:
+        c.drawPath(p, fill=1, stroke=0)
+    else:
+        c.drawPath(p, fill=0, stroke=1)
+    c.restoreState()
+
+
+def draw_step_number(c, x, y, num, color=None):
+    """Draw a circled step number."""
+    c.saveState()
+    c.setFillColor(color or STEP_NUM_BG)
+    c.circle(x, y, 10, fill=1, stroke=0)
+    c.setFillColor(white)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawCentredString(x, y - 3.5, str(num))
+    c.restoreState()
+
+
+def draw_image_fit(c, img_path, x, y, max_w, max_h):
+    """Draw an image scaled to fit within a bounding box, centered."""
+    try:
+        img = Image.open(img_path)
+        iw, ih = img.size
+
+        # Handle EXIF rotation
+        try:
+            from PIL import ExifTags
+            exif = img._getexif()
+            if exif:
+                for tag, value in exif.items():
+                    if ExifTags.TAGS.get(tag) == 'Orientation':
+                        if value == 3:
+                            img = img.rotate(180, expand=True)
+                        elif value == 6:
+                            img = img.rotate(270, expand=True)
+                        elif value == 8:
+                            img = img.rotate(90, expand=True)
+                        iw, ih = img.size
+                        break
+        except:
+            pass
+
+        ratio = min(max_w / iw, max_h / ih)
+        draw_w = iw * ratio
+        draw_h = ih * ratio
+
+        # Center in the box
+        cx = x + (max_w - draw_w) / 2
+        cy = y + (max_h - draw_h) / 2
+
+        # Draw subtle shadow/border
+        draw_rounded_rect(c, cx - 1, cy - 1, draw_w + 2, draw_h + 2, 4,
+                          stroke_color=DIVIDER, stroke_width=0.5)
+
+        c.drawImage(ImageReader(img), cx, cy, draw_w, draw_h, preserveAspectRatio=True)
+        return draw_w, draw_h
+    except Exception as e:
+        print(f"Error drawing image {img_path}: {e}")
+        return 0, 0
+
+
+def draw_page_number(c, page_num):
+    """Draw page number at bottom center."""
+    c.saveState()
+    c.setFont("Helvetica", 9)
+    c.setFillColor(TEXT_LIGHT)
+    c.drawCentredString(PAGE_W / 2, 30, str(page_num))
+    c.restoreState()
+
+
+def draw_header_bar(c, text, y=None, color=None):
+    """Draw a colored header bar across the page."""
+    if y is None:
+        y = PAGE_H - 50
+    c.saveState()
+    c.setFillColor(color or ACCENT)
+    c.rect(0, y, PAGE_W, 36, fill=1, stroke=0)
+    c.setFillColor(white)
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(MARGIN, y + 11, text)
+    c.restoreState()
+    return y
+
+
+# ========== BUILD PDF ==========
+c = canvas.Canvas(OUTPUT_PDF, pagesize=letter)
+page_num = 0
+
+# ===== COVER PAGE =====
+page_num += 1
+# Split background: blue left half, pink right half
+c.setFillColor(ACCENT)
+c.rect(0, 0, PAGE_W / 2, PAGE_H, fill=1, stroke=0)
+c.setFillColor(PINK_HEADER_BG)
+c.rect(PAGE_W / 2, 0, PAGE_W / 2, PAGE_H, fill=1, stroke=0)
+
+# Lighter overlay at top spanning both
+c.setFillColor(HexColor("#3182CE"))
+c.rect(0, PAGE_H * 0.55, PAGE_W / 2, PAGE_H * 0.45, fill=1, stroke=0)
+c.setFillColor(HexColor("#E84393"))
+c.rect(PAGE_W / 2, PAGE_H * 0.55, PAGE_W / 2, PAGE_H * 0.45, fill=1, stroke=0)
+
+# Title block
+c.setFillColor(white)
+c.setFont("Helvetica-Bold", 36)
+c.drawCentredString(PAGE_W / 2, PAGE_H * 0.72, "Meal Prep")
+c.drawCentredString(PAGE_W / 2, PAGE_H * 0.72 - 44, "Instruction Booklet")
+
+# Decorative line
+c.setStrokeColor(HexColor("#BEE3F8"))
+c.setLineWidth(2)
+c.line(PAGE_W * 0.3, PAGE_H * 0.72 - 60, PAGE_W * 0.7, PAGE_H * 0.72 - 60)
+
+# Subtitle
+c.setFont("Helvetica", 14)
+c.setFillColor(HexColor("#BEE3F8"))
+# Color-coded subtitle
+c.setFont("Helvetica-Bold", 15)
+c.setFillColor(HexColor("#BEE3F8"))
+blue_text = "Juliette"
+pink_text = "Isabelle"
+prefix = "Recipes & Meal Guidelines for "
+amper = " & "
+# Measure widths
+pw = c.stringWidth(prefix, "Helvetica", 14)
+bw = c.stringWidth(blue_text, "Helvetica-Bold", 15)
+aw = c.stringWidth(amper, "Helvetica", 14)
+pkw = c.stringWidth(pink_text, "Helvetica-Bold", 15)
+total_w = pw + bw + aw + pkw
+start_x = (PAGE_W - total_w) / 2
+sub_y = PAGE_H * 0.72 - 85
+
+c.setFont("Helvetica", 14)
+c.setFillColor(HexColor("#BEE3F8"))
+c.drawString(start_x, sub_y, prefix)
+
+c.setFont("Helvetica-Bold", 15)
+c.setFillColor(HexColor("#90CDF4"))
+c.drawString(start_x + pw, sub_y, blue_text)
+
+c.setFont("Helvetica", 14)
+c.setFillColor(HexColor("#BEE3F8"))
+c.drawString(start_x + pw + bw, sub_y, amper)
+
+c.setFont("Helvetica-Bold", 15)
+c.setFillColor(HexColor("#FFB6C1"))
+c.drawString(start_x + pw + bw + aw, sub_y, pink_text)
+
+# Bottom info
+c.setFont("Helvetica", 11)
+c.setFillColor(HexColor("#90CDF4"))
+c.drawCentredString(PAGE_W / 2, 60, "Please follow each recipe carefully.")
+c.drawCentredString(PAGE_W / 2, 42, "Photos are provided as visual guides.")
+
+c.showPage()
+
+
+# ===== TABLE OF CONTENTS =====
+page_num += 1
+c.setFillColor(ACCENT)
+c.rect(0, PAGE_H - 70, PAGE_W, 70, fill=1, stroke=0)
+c.setFillColor(white)
+c.setFont("Helvetica-Bold", 22)
+c.drawString(MARGIN, PAGE_H - 48, "Table of Contents")
+
+toc_items = [
+    ("1.", "General Meal Guidelines & Lunch Packing", "3"),
+    ("2.", "Morning Smoothie", "4"),
+    ("3.", "Waffles with Peanut Butter & Syrup", "5-6"),
+    ("4.", "Chicken Nuggets", "7-8"),
+    ("5.", "Peanut Butter & Jelly Toast", "9"),
+    ("6.", "Ramen for Isabelle", "10"),
+    ("7.", "French Toast Sticks & Turkey Hotdogs", "10"),
+    ("8.", "Isabelle's Food Preferences", "11-12"),
+]
+
+y = PAGE_H - 120
+for num, title, pg in toc_items:
+    # Alternating row background
+    idx = toc_items.index((num, title, pg))
+    if idx % 2 == 0:
+        draw_rounded_rect(c, MARGIN - 8, y - 8, PAGE_W - 2 * MARGIN + 16, 32, 4, fill_color=STEP_BG)
+
+    c.setFont("Helvetica-Bold", 12)
+    c.setFillColor(ACCENT)
+    c.drawString(MARGIN, y, num)
+    c.setFont("Helvetica", 12)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 24, y, title)
+    c.setFont("Helvetica", 11)
+    c.setFillColor(TEXT_LIGHT)
+    c.drawRightString(PAGE_W - MARGIN, y, pg)
+
+    # Dotted line
+    c.setStrokeColor(DIVIDER)
+    c.setDash(1, 3)
+    c.setLineWidth(0.5)
+    text_end = MARGIN + 24 + c.stringWidth(title, "Helvetica", 12) + 10
+    page_start = PAGE_W - MARGIN - c.stringWidth(pg, "Helvetica", 11) - 10
+    if text_end < page_start:
+        c.line(text_end, y + 2, page_start, y + 2)
+    c.setDash()
+
+    y -= 38
+
+draw_page_number(c, page_num)
+c.showPage()
+
+
+# ===== PAGE 3: GENERAL MEAL GUIDELINES + LUNCH PHOTOS =====
+page_num += 1
+draw_header_bar(c, "General Meal Guidelines")
+
+y = PAGE_H - 105
+
+# Meal times section
+draw_rounded_rect(c, MARGIN, y - 175, PAGE_W - 2 * MARGIN, 180, 8, fill_color=STEP_BG)
+c.setFont("Helvetica-Bold", 13)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN + 15, y - 8, "Meal Times")
+c.setStrokeColor(ACCENT)
+c.setLineWidth(1)
+c.line(MARGIN + 15, y - 14, MARGIN + 120, y - 14)
+
+guidelines = [
+    ("Morning Smoothie:", "7:00 AM. If not fully consumed, they can bring it to school."),
+    ("", "Juliette usually will bring it to school."),
+    ("", "Isabelle - encourage to finish before leaving."),
+    ("Lunch:", "1:30 - 2:00 PM. Any meal can be offered."),
+    ("", "Pick from Juliette's instructions for her. Isabelle can be asked what she wants."),
+    ("Dinner:", "4:30 - 8:00 PM (8:00 PM is the latest). 6:30 - 7:30 PM preferred."),
+]
+
+gy = y - 35
+for label, detail in guidelines:
+    if label:
+        c.setFont("Helvetica-Bold", 10)
+        c.setFillColor(TEXT_DARK)
+        c.drawString(MARGIN + 20, gy, label)
+        c.setFont("Helvetica", 10)
+        c.setFillColor(TEXT_MED)
+        c.drawString(MARGIN + 20 + c.stringWidth(label, "Helvetica-Bold", 10) + 6, gy, detail)
+    else:
+        c.setFont("Helvetica", 10)
+        c.setFillColor(TEXT_MED)
+        c.drawString(MARGIN + 40, gy, detail)
+    gy -= 17
+
+# Drinks section
+drink_y = y - 200
+draw_rounded_rect(c, MARGIN, drink_y - 60, PAGE_W - 2 * MARGIN, 65, 8, fill_color=INGREDIENT_BG, stroke_color=DIVIDER)
+c.setFont("Helvetica-Bold", 13)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN + 15, drink_y - 8, "Drinks")
+c.setFont("Helvetica", 10)
+c.setFillColor(TEXT_MED)
+c.drawString(MARGIN + 20, drink_y - 28, "All meals can be served with sparkling water (preferred for Juliette).")
+c.drawString(MARGIN + 20, drink_y - 44, "Yogurt drink can also be offered. Isabelle can pick whatever drink she desires.")
+
+# Lunch packing photos
+photo_y = drink_y - 95
+c.setFont("Helvetica-Bold", 13)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN, photo_y, "Lunch Packing Reference Photos")
+
+photo_w = (PAGE_W - 2 * MARGIN - 20) / 3
+photo_h = 170
+img_y = photo_y - photo_h - 15
+
+lunch_imgs = [
+    os.path.join(IMG_DIR, "IMG_0367.jpeg"),
+    os.path.join(IMG_DIR, "IMG_0371.jpeg"),
+    os.path.join(IMG_DIR, "IMG_0373.jpeg"),
+]
+for i, img_path in enumerate(lunch_imgs):
+    ix = MARGIN + i * (photo_w + 10)
+    draw_rounded_rect(c, ix - 2, img_y - 2, photo_w + 4, photo_h + 4, 6, fill_color=white, stroke_color=DIVIDER)
+    draw_image_fit(c, img_path, ix, img_y, photo_w, photo_h)
+
+# Captions
+cap_y = img_y - 16
+captions = ["Packed lunchbox example", "Lunchbox with drink", "Lunch bag"]
+c.setFont("Helvetica", 8)
+c.setFillColor(TEXT_LIGHT)
+for i, cap in enumerate(captions):
+    cx = MARGIN + i * (photo_w + 10) + photo_w / 2
+    c.drawCentredString(cx, cap_y, cap)
+
+draw_page_number(c, page_num)
+c.showPage()
+
+
+# ===== PAGE 4: MORNING SMOOTHIE =====
+page_num += 1
+draw_header_bar(c, "Morning Smoothie")
+
+y = PAGE_H - 105
+c.setFont("Helvetica-Oblique", 11)
+c.setFillColor(TEXT_MED)
+c.drawString(MARGIN, y, "Smoothie for both girls")
+y -= 30
+
+# Ingredients box
+ing_box_h = 85
+draw_rounded_rect(c, MARGIN, y - ing_box_h, (PAGE_W - 2 * MARGIN) * 0.48, ing_box_h + 5, 8,
+                  fill_color=INGREDIENT_BG, stroke_color=DIVIDER)
+c.setFont("Helvetica-Bold", 12)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN + 12, y - 5, "Ingredients")
+ingredients_sm = [
+    "2 powder packets Carnation Breakfast Essentials",
+    "1/2 cup bananas and strawberry mix",
+    "1 Greek yogurt",
+]
+iy = y - 25
+for ing in ingredients_sm:
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 20, iy, "\u2022  " + ing)
+    iy -= 18
+
+# Steps
+steps_sm = [
+    "Fill blender with almond milk until reaching the 2-cup measurement line.",
+    "Add 2 powder packets of Carnation Breakfast Essentials.",
+    "Add 1/2 cup bananas and strawberry mix.",
+    "Add 1 Greek yogurt.",
+    "Blend for 1-2 minutes until all ingredients are smooth.",
+    "Divide equally into two cups.",
+]
+
+step_y = y - ing_box_h - 25
+c.setFont("Helvetica-Bold", 12)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN, step_y, "Instructions")
+step_y -= 22
+
+for i, step in enumerate(steps_sm):
+    draw_step_number(c, MARGIN + 12, step_y + 3, i + 1)
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 30, step_y, step)
+    step_y -= 22
+
+# Photos
+photo_y = step_y - 20
+c.setFont("Helvetica-Bold", 11)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN, photo_y, "Visual Guide")
+photo_y -= 10
+
+ph_w = (PAGE_W - 2 * MARGIN - 15) / 2
+ph_h = 200
+sm_imgs = [
+    (os.path.join(IMG_DIR, "IMG_0375.jpeg"), "Ingredients laid out"),
+    (os.path.join(IMG_DIR, "IMG_0376.jpeg"), "Blended & ready to serve"),
+]
+for i, (img_path, caption) in enumerate(sm_imgs):
+    ix = MARGIN + i * (ph_w + 15)
+    draw_rounded_rect(c, ix - 2, photo_y - ph_h - 2, ph_w + 4, ph_h + 4, 6,
+                      fill_color=white, stroke_color=DIVIDER)
+    draw_image_fit(c, img_path, ix, photo_y - ph_h, ph_w, ph_h)
+    c.setFont("Helvetica", 8)
+    c.setFillColor(TEXT_LIGHT)
+    c.drawCentredString(ix + ph_w / 2, photo_y - ph_h - 14, caption)
+
+draw_page_number(c, page_num)
+c.showPage()
+
+
+# ===== PAGES 5-6: WAFFLES =====
+page_num += 1
+draw_header_bar(c, "Waffles with Peanut Butter & Syrup")
+
+y = PAGE_H - 105
+
+# Ingredients
+ing_box_h = 70
+draw_rounded_rect(c, MARGIN, y - ing_box_h, (PAGE_W - 2 * MARGIN) * 0.45, ing_box_h + 5, 8,
+                  fill_color=INGREDIENT_BG, stroke_color=DIVIDER)
+c.setFont("Helvetica-Bold", 12)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN + 12, y - 5, "Ingredients")
+waffle_ings = ["Two waffles", "Peanut butter", "Syrup"]
+iy = y - 25
+for ing in waffle_ings:
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 20, iy, "\u2022  " + ing)
+    iy -= 18
+
+# Steps
+waffle_steps = [
+    "Toast two waffles. Turn the silver knob all the way to the right.",
+    "Repeat toasting. Set toaster to number 4.",
+    "Make sure waffles are well toasted, not burnt.",
+    "Remove from toaster.",
+    "Spread peanut butter on each waffle.",
+    "Cut into small square pieces.",
+    "Add a generous drizzle of syrup.",
+]
+
+step_y = y - ing_box_h - 25
+c.setFont("Helvetica-Bold", 12)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN, step_y, "Instructions")
+step_y -= 22
+
+for i, step in enumerate(waffle_steps):
+    draw_step_number(c, MARGIN + 12, step_y + 3, i + 1)
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 30, step_y, step)
+    step_y -= 22
+
+# Photos - 2x2 grid
+photo_y = step_y - 15
+c.setFont("Helvetica-Bold", 11)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN, photo_y, "Step-by-Step Photos")
+photo_y -= 10
+
+waffle_imgs = [
+    (os.path.join(IMG_DIR, "IMG_0285.jpeg"), "Ingredients: PB & Syrup"),
+    (os.path.join(IMG_DIR, "IMG_0289.jpeg"), "Toasted waffles"),
+    (os.path.join(IMG_DIR, "IMG_0290.jpeg"), "Peanut butter spread"),
+    (os.path.join(IMG_DIR, "IMG_0291.jpeg"), "Cut & drizzled with syrup"),
+]
+
+ph_w = (PAGE_W - 2 * MARGIN - 15) / 2
+ph_h = 155
+for i, (img_path, caption) in enumerate(waffle_imgs[:2]):
+    ix = MARGIN + i * (ph_w + 15)
+    draw_rounded_rect(c, ix - 2, photo_y - ph_h - 2, ph_w + 4, ph_h + 4, 6,
+                      fill_color=white, stroke_color=DIVIDER)
+    draw_image_fit(c, img_path, ix, photo_y - ph_h, ph_w, ph_h)
+    c.setFont("Helvetica", 8)
+    c.setFillColor(TEXT_LIGHT)
+    c.drawCentredString(ix + ph_w / 2, photo_y - ph_h - 14, caption)
+
+draw_page_number(c, page_num)
+c.showPage()
+
+# Page 6 - remaining waffle photos
+page_num += 1
+draw_header_bar(c, "Waffles (continued)")
+
+y = PAGE_H - 100
+c.setFont("Helvetica-Bold", 11)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN, y, "Step-by-Step Photos (continued)")
+y -= 15
+
+ph_h = 220
+for i, (img_path, caption) in enumerate(waffle_imgs[2:]):
+    ix = MARGIN + i * (ph_w + 15)
+    draw_rounded_rect(c, ix - 2, y - ph_h - 2, ph_w + 4, ph_h + 4, 6,
+                      fill_color=white, stroke_color=DIVIDER)
+    draw_image_fit(c, img_path, ix, y - ph_h, ph_w, ph_h)
+    c.setFont("Helvetica", 8)
+    c.setFillColor(TEXT_LIGHT)
+    c.drawCentredString(ix + ph_w / 2, y - ph_h - 14, caption)
+
+draw_page_number(c, page_num)
+c.showPage()
+
+
+# ===== PAGES 7-8: CHICKEN NUGGETS (Isabelle = PINK) =====
+page_num += 1
+draw_header_bar(c, "Chicken Nuggets", color=PINK_HEADER_BG)
+
+y = PAGE_H - 105
+
+# Ingredients
+ing_box_h = 50
+draw_rounded_rect(c, MARGIN, y - ing_box_h, (PAGE_W - 2 * MARGIN) * 0.45, ing_box_h + 5, 8,
+                  fill_color=PINK_INGREDIENT_BG, stroke_color=PINK_DIVIDER)
+c.setFont("Helvetica-Bold", 12)
+c.setFillColor(PINK_ACCENT)
+c.drawString(MARGIN + 12, y - 5, "Ingredients")
+nugget_ings = ["Chicken nuggets", "Ketchup"]
+iy = y - 25
+for ing in nugget_ings:
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 20, iy, "\u2022  " + ing)
+    iy -= 18
+
+# Steps
+nugget_steps = [
+    "Place chicken nuggets in the air fryer.",
+    "Push the circle button.",
+    "Press start.",
+    "Allow nuggets to cook until air fryer displays 10:00 minutes.",
+    "Remove from air fryer and cut into small square pieces.",
+    "Place back into the air fryer.",
+    "Remove nuggets when 4:00 minutes remain.",
+    "Serve with ketchup.",
+]
+
+step_y = y - ing_box_h - 25
+c.setFont("Helvetica-Bold", 12)
+c.setFillColor(PINK_ACCENT)
+c.drawString(MARGIN, step_y, "Instructions")
+step_y -= 22
+
+for i, step in enumerate(nugget_steps):
+    draw_step_number(c, MARGIN + 12, step_y + 3, i + 1, color=PINK_STEP_NUM_BG)
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 30, step_y, step)
+    step_y -= 22
+
+# Photos
+photo_y = step_y - 15
+c.setFont("Helvetica-Bold", 11)
+c.setFillColor(PINK_ACCENT)
+c.drawString(MARGIN, photo_y, "Visual Guide")
+photo_y -= 10
+
+nugget_imgs_row1 = [
+    (os.path.join(IMG_DIR, "IMG_0310.jpeg"), "Air fryer set to 10:00"),
+    (os.path.join(IMG_DIR, "IMG_0311.jpeg"), "Cooked nuggets"),
+    (os.path.join(IMG_DIR, "IMG_0308.jpeg"), "Ketchup & serving plate"),
+]
+
+ph_w_3 = (PAGE_W - 2 * MARGIN - 20) / 3
+ph_h = 170
+for i, (img_path, caption) in enumerate(nugget_imgs_row1):
+    ix = MARGIN + i * (ph_w_3 + 10)
+    draw_rounded_rect(c, ix - 2, photo_y - ph_h - 2, ph_w_3 + 4, ph_h + 4, 6,
+                      fill_color=white, stroke_color=DIVIDER)
+    draw_image_fit(c, img_path, ix, photo_y - ph_h, ph_w_3, ph_h)
+    c.setFont("Helvetica", 8)
+    c.setFillColor(TEXT_LIGHT)
+    c.drawCentredString(ix + ph_w_3 / 2, photo_y - ph_h - 14, caption)
+
+draw_page_number(c, page_num)
+c.showPage()
+
+# Page 8 - Chicken Nuggets continued (cutting & serving photos)
+page_num += 1
+draw_header_bar(c, "Chicken Nuggets (continued)", color=PINK_HEADER_BG)
+
+y = PAGE_H - 100
+c.setFont("Helvetica-Bold", 11)
+c.setFillColor(PINK_ACCENT)
+c.drawString(MARGIN, y, "Cutting & Serving Photos")
+y -= 15
+
+nugget_imgs_row2 = [
+    (os.path.join(IMG_DIR, "IMG_0312.jpeg"), "Nuggets cut into small pieces"),
+    (os.path.join(IMG_DIR, "IMG_0317.jpeg"), "Served with ketchup on plate"),
+]
+
+ph_w_2 = (PAGE_W - 2 * MARGIN - 15) / 2
+ph_h_2 = 260
+for i, (img_path, caption) in enumerate(nugget_imgs_row2):
+    ix = MARGIN + i * (ph_w_2 + 15)
+    draw_rounded_rect(c, ix - 2, y - ph_h_2 - 2, ph_w_2 + 4, ph_h_2 + 4, 6,
+                      fill_color=white, stroke_color=DIVIDER)
+    draw_image_fit(c, img_path, ix, y - ph_h_2, ph_w_2, ph_h_2)
+    c.setFont("Helvetica", 8)
+    c.setFillColor(TEXT_LIGHT)
+    c.drawCentredString(ix + ph_w_2 / 2, y - ph_h_2 - 14, caption)
+
+draw_page_number(c, page_num)
+c.showPage()
+
+
+# ===== PAGE 9: PB&J TOAST =====
+page_num += 1
+draw_header_bar(c, "Peanut Butter & Jelly Toast")
+
+y = PAGE_H - 105
+
+# Ingredients
+ing_box_h = 65
+draw_rounded_rect(c, MARGIN, y - ing_box_h, (PAGE_W - 2 * MARGIN) * 0.45, ing_box_h + 5, 8,
+                  fill_color=INGREDIENT_BG, stroke_color=DIVIDER)
+c.setFont("Helvetica-Bold", 12)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN + 12, y - 5, "Ingredients")
+pbj_ings = ["Peanut butter", "Jelly", "Bread"]
+iy = y - 25
+for ing in pbj_ings:
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 20, iy, "\u2022  " + ing)
+    iy -= 18
+
+# Steps
+pbj_steps = [
+    "Place 1-2 pieces of bread into the toaster.",
+    "Set toaster to number 4.",
+    "Remove from toaster.",
+    "Spread peanut butter.",
+    "Spread jelly on top.",
+    "Cut into 4 equal pieces and serve.",
+]
+
+step_y = y - ing_box_h - 25
+c.setFont("Helvetica-Bold", 12)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN, step_y, "Instructions")
+step_y -= 22
+
+for i, step in enumerate(pbj_steps):
+    draw_step_number(c, MARGIN + 12, step_y + 3, i + 1)
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 30, step_y, step)
+    step_y -= 22
+
+# Photo
+photo_y = step_y - 20
+c.setFont("Helvetica-Bold", 11)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN, photo_y, "Finished Result")
+photo_y -= 10
+
+ph_w = PAGE_W - 2 * MARGIN
+ph_h = 280
+draw_rounded_rect(c, MARGIN - 2, photo_y - ph_h - 2, ph_w + 4, ph_h + 4, 6,
+                  fill_color=white, stroke_color=DIVIDER)
+draw_image_fit(c, os.path.join(IMG_DIR, "IMG_0346.jpeg"), MARGIN, photo_y - ph_h, ph_w, ph_h)
+c.setFont("Helvetica", 8)
+c.setFillColor(TEXT_LIGHT)
+c.drawCentredString(PAGE_W / 2, photo_y - ph_h - 14, "PB&J toast cut into pieces with Jif peanut butter & Welch's grape jelly")
+
+draw_page_number(c, page_num)
+c.showPage()
+
+
+# ===== PAGE 10: RAMEN + FRENCH TOAST STICKS + TURKEY HOTDOGS (No photos) =====
+page_num += 1
+draw_header_bar(c, "Additional Recipes (No Photos)")
+
+y = PAGE_H - 100
+
+# --- Ramen (Isabelle = PINK) ---
+draw_rounded_rect(c, MARGIN, y - 175, PAGE_W - 2 * MARGIN, 180, 8, fill_color=PINK_STEP_BG)
+c.setFont("Helvetica-Bold", 16)
+c.setFillColor(PINK_ACCENT)
+c.drawString(MARGIN + 12, y - 5, "Ramen for Isabelle")
+
+c.setFont("Helvetica-Bold", 11)
+c.setFillColor(TEXT_DARK)
+c.drawString(MARGIN + 15, y - 30, "Ingredients:")
+c.setFont("Helvetica", 10)
+c.drawString(MARGIN + 100, y - 30, "1 packet Maruchan noodles, 1 piece American cheese")
+
+ramen_steps = [
+    "Boil 2 cups of water.",
+    "Add seasoning packet.",
+    "Let come to a boil.",
+    "Break noodles in half.",
+    "Add noodles to water.",
+    "Add American cheese.",
+    "Let boil and serve in bowl.",
+]
+ry = y - 55
+for i, step in enumerate(ramen_steps):
+    draw_step_number(c, MARGIN + 22, ry + 3, i + 1, color=PINK_STEP_NUM_BG)
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 40, ry, step)
+    ry -= 18
+
+# --- French Toast Sticks ---
+ft_y = y - 210
+draw_rounded_rect(c, MARGIN, ft_y - 105, (PAGE_W - 2 * MARGIN) * 0.55, 110, 8,
+                  fill_color=INGREDIENT_BG, stroke_color=DIVIDER)
+c.setFont("Helvetica-Bold", 16)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN + 12, ft_y - 5, "French Toast Sticks")
+
+c.setFont("Helvetica-Bold", 11)
+c.setFillColor(TEXT_DARK)
+c.drawString(MARGIN + 15, ft_y - 28, "Ingredients:")
+c.setFont("Helvetica", 10)
+c.drawString(MARGIN + 100, ft_y - 28, "French toast sticks, Syrup")
+
+ft_steps = [
+    "Place 6-7 pieces on a plate.",
+    "Place in microwave for 1 minute (or as needed).",
+    "Serve with syrup on the side (pink square container).",
+]
+fty = ft_y - 50
+for i, step in enumerate(ft_steps):
+    draw_step_number(c, MARGIN + 22, fty + 3, i + 1)
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 40, fty, step)
+    fty -= 18
+
+c.setFont("Helvetica-Oblique", 9)
+c.setFillColor(TEXT_LIGHT)
+c.drawString(MARGIN + 20, fty, "Container is on the 2nd shelf of the cabinet.")
+
+# --- Turkey Hotdogs ---
+td_y = ft_y - 145
+draw_rounded_rect(c, MARGIN, td_y - 75, (PAGE_W - 2 * MARGIN) * 0.55, 80, 8,
+                  fill_color=INGREDIENT_BG, stroke_color=DIVIDER)
+c.setFont("Helvetica-Bold", 16)
+c.setFillColor(ACCENT)
+c.drawString(MARGIN + 12, td_y - 5, "Turkey Hotdogs")
+
+c.setFont("Helvetica-Bold", 11)
+c.setFillColor(TEXT_DARK)
+c.drawString(MARGIN + 15, td_y - 28, "Ingredients:")
+c.setFont("Helvetica", 10)
+c.drawString(MARGIN + 100, td_y - 28, "2 hotdogs, Chick-fil-A sauce")
+
+td_steps = [
+    "Cook in air fryer for five minutes.",
+    "Serve with Chick-fil-A sauce.",
+]
+tdy = td_y - 50
+for i, step in enumerate(td_steps):
+    draw_step_number(c, MARGIN + 22, tdy + 3, i + 1)
+    c.setFont("Helvetica", 10)
+    c.setFillColor(TEXT_DARK)
+    c.drawString(MARGIN + 40, tdy, step)
+    tdy -= 18
+
+draw_page_number(c, page_num)
+c.showPage()
+
+
+# ===== PAGE 11: ISABELLE'S FOOD PREFERENCES (PINK) =====
+page_num += 1
+draw_header_bar(c, "Isabelle's Food Preferences", color=PINK_HEADER_BG)
+
+y = PAGE_H - 100
+c.setFont("Helvetica-Oblique", 11)
+c.setFillColor(PINK_ACCENT)
+c.drawString(MARGIN, y, "Foods she likes - use as a reference for what to offer Isabelle")
+y -= 30
+
+isabelle_foods = [
+    "Angel hair pasta with alfredo sauce (shrimp optional)",
+    "1 sauce of oatmeal mixed with one Greek yogurt",
+    "Nutella + pistachio sandwich (not toasted)",
+    "Mozzarella sticks",
+    "Cheese pizza",
+    "Her nuggets (green package) with sauce",
+    "Happy Meal: 10-piece nuggets OR 6-piece with a small sauce",
+    "Mashed potatoes with butter on the side, plus one big sauce",
+    "Wingstop chicken strips with Chick-fil-A sauce",
+    "Feel free to use ketchup and other sauces",
+    "Tuna sandwich: mix tuna with mayo, a bit of salt, on toast,",
+    "    1 piece bread and two pickles",
+    "Drinks: water, lemon + lime",
+]
+
+for i, food in enumerate(isabelle_foods):
+    if food.startswith("    "):
+        c.setFont("Helvetica", 10)
+        c.setFillColor(TEXT_MED)
+        c.drawString(MARGIN + 30, y, food.strip())
+    else:
+        # Alternating row colors - PINK
+        if i % 2 == 0:
+            draw_rounded_rect(c, MARGIN - 5, y - 6, PAGE_W - 2 * MARGIN + 10, 22, 3, fill_color=PINK_STEP_BG)
+        c.setFont("Helvetica", 10.5)
+        c.setFillColor(TEXT_DARK)
+        c.drawString(MARGIN + 5, y, "\u2022  " + food)
+    y -= 24
+
+# Dinner time note - pink tinted
+y -= 15
+draw_rounded_rect(c, MARGIN, y - 30, PAGE_W - 2 * MARGIN, 35, 6, fill_color=HexColor("#FFF0F7"), stroke_color=PINK_DIVIDER)
+c.setFont("Helvetica-Bold", 10)
+c.setFillColor(PINK_ACCENT)
+c.drawString(MARGIN + 12, y - 8, "Note:")
+c.setFont("Helvetica", 10)
+c.setFillColor(TEXT_DARK)
+c.drawString(MARGIN + 50, y - 8, "Dinner preferred at 6:30 - 7:30 PM")
+
+draw_page_number(c, page_num)
+c.showPage()
+
+# Save
+c.save()
+print(f"PDF created: {OUTPUT_PDF}")
+print(f"Total pages: {page_num}")
